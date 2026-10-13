@@ -1,0 +1,8 @@
+/scratch/
+*.onnx
+*.pt
+__pycache__/
+*.log
+
+# 训练数据/模型/运行产物：可重跑得到，不入库（需要时从 runs/ 拷）
+runs/
