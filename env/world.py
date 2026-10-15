@@ -61,6 +61,10 @@ class HeadlessWorld:
             real_assets=(self.args.assets_dir if self.args.model == "real" else None),
             xml_hook=rm_link._build_xml_hook(self.args, elev_deg),
             gun_params=rm_link.gun_params_from_args(self.args),
+            # 弹道气动也走同一份配置（configs/ballistics.yaml）——训练世界必须与评测一致，
+            # 默认 enabled=false ⇒ 只有重力（历史上一直如此）
+            ballistics_params=rm_link.ballistics_params_from_config(
+                rm_link.load_config(self.args), self.args),
         )
         rm_link.apply_cmd_args(self.demo, self.args)      # 与联调同一份配置
         self.demo._rng = np.random.default_rng(int(seed))
