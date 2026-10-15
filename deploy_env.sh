@@ -75,11 +75,12 @@ NUMPY_PIN="numpy"
 # 单独给本仓库建 venv 时也能自洽。**必须钉 3.11.0**，理由同 deploy_rm_sim.sh。
 MUJOCO_PIN="${MUJOCO_PIN:-mujoco==3.11.0}"
 # 其余清单与 tools/dual_machine/*_setup.sh 同一套：训练/评测/导出 ONNX 都用得到
+# onnxscript：torch>=2.6 的**默认** ONNX 导出器要它（我们优先走旧导出器，装上更保险）
 if ! "$V/pip" install -q -i "$PIP_MIRROR" "$MUJOCO_PIN" \
-      "$NUMPY_PIN" PyYAML gymnasium matplotlib onnx onnxruntime scikit-learn; then
+      "$NUMPY_PIN" PyYAML gymnasium matplotlib onnx onnxscript onnxruntime scikit-learn; then
   bad "镜像源装失败，回落 PyPI 再试一次"
   "$V/pip" install -q "$MUJOCO_PIN" \
-      "$NUMPY_PIN" PyYAML gymnasium matplotlib onnx onnxruntime scikit-learn \
+      "$NUMPY_PIN" PyYAML gymnasium matplotlib onnx onnxscript onnxruntime scikit-learn \
       || { bad "依赖装不上，检查网络/代理"; exit 1; }
 fi
 ok "基础依赖装好（含 $MUJOCO_PIN）"
