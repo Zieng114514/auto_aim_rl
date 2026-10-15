@@ -70,6 +70,10 @@ class HeadlessWorld:
         self.demo._rng = np.random.default_rng(int(seed))
 
         self.model, self.data = self.demo.model, self.demo.data
+        # 弹道阻力系数 k（1/m）：**镜像解算器必须用与仿真同一个值**（默认 0 = 无阻力）。
+        # 来源 = configs/ballistics.yaml（经 demo.ballistics 带过来），不给两处漂移的机会。
+        _b = getattr(self.demo, "ballistics", None)
+        self.ball_k = float(_b.k) if (_b is not None and _b.enabled) else 0.0
         # 炮口所在 body（= pitch 体）：取世界指向要用它的姿态矩阵
         self.pitch_bid = int(self.model.site_bodyid[self.demo.muzzle_sid])
         self.cars = CarField(

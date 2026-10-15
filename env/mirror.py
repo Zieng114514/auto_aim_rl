@@ -25,9 +25,77 @@ import numpy as np
 # 与 sp_vision_25/tools/trajectory.cpp 保持一致
 G = 9.7833
 
+# 带阻力数值解的常数：**必须与 trajectory.cpp 的 fly_to / solve_pitch_drag 完全一致**
+DRAG_DT = 2e-3        # 固定步长 RK4（s）
+DRAG_BISECT = 16      # 二分次数 ⇒ 角分辨率 2e-5 rad（10 m 处 0.2 mm）
 
-def trajectory(v0: float, d: float, h: float):
-    """闭式弹道解（照搬 trajectory.cpp）。返回 (unsolvable, fly_time, pitch)，pitch 抬头为正。"""
+
+def _fly_to(v0: float, pitch: float, d: float, k: float, dt: float = DRAG_DT):
+    """水平推进到 d，返回 (ok, z, t)。与 trajectory.cpp 的 fly_to 同一套算法（RK4、同步长）。"""
+    vx = v0 * math.cos(pitch)
+    vz = v0 * math.sin(pitch)
+    if vx <= 0.0:
+        return False, 0.0, 0.0
+    x = z = t = 0.0
+
+    def acc(vx_: float, vz_: float):
+        s = math.hypot(vx_, vz_)
+        return -k * s * vx_, -G - k * s * vz_
+
+    for _ in range(20000):                      # 20 s 上限（弹丸 TTL 只有 4 s）
+        ax1, az1 = acc(vx, vz)
+        ax2, az2 = acc(vx + 0.5 * dt * ax1, vz + 0.5 * dt * az1)
+        ax3, az3 = acc(vx + 0.5 * dt * ax2, vz + 0.5 * dt * az2)
+        ax4, az4 = acc(vx + dt * ax3, vz + dt * az3)
+        x0, z0, t0 = x, z, t
+        vx += dt * (ax1 + 2 * ax2 + 2 * ax3 + ax4) / 6.0
+        vz += dt * (az1 + 2 * az2 + 2 * az3 + az4) / 6.0
+        x += vx * dt
+        z += vz * dt
+        t += dt
+        if x >= d:                              # 线性插值到恰好 x == d
+            frac = (d - x0) / (x - x0) if (x - x0) > 1e-12 else 0.0
+            return True, z0 + (z - z0) * frac, t0 + (t - t0) * frac
+    return False, 0.0, 0.0
+
+
+def _solve_pitch_drag(v0: float, d: float, h: float, k: float):
+    """二分求"低伸解"。返回 (ok, fly_time, pitch)。与 C++ 的 solve_pitch_drag 同一套。"""
+    lo0, hi0 = -0.6, 0.7854                     # -34° ~ +45°
+    ok_lo, z_lo, _ = _fly_to(v0, lo0, d, k)
+    ok_hi, z_hi, _ = _fly_to(v0, hi0, d, k)
+    if not (ok_lo and ok_hi) or z_lo > h or z_hi < h:
+        return False, 0.0, 0.0                  # 这个距离/高度组合打不到
+    lo, hi = lo0, hi0
+    for _ in range(DRAG_BISECT):
+        mid = 0.5 * (lo + hi)
+        ok, z, _ = _fly_to(v0, mid, d, k)
+        if not ok:
+            return False, 0.0, 0.0
+        if z < h:
+            lo = mid
+        else:
+            hi = mid
+    pitch = 0.5 * (lo + hi)
+    ok, _z, t = _fly_to(v0, pitch, d, k)
+    if not ok:
+        return False, 0.0, 0.0
+    return True, t, pitch
+
+
+def trajectory(v0: float, d: float, h: float, k: float = 0.0):
+    """弹道解。返回 (unsolvable, fly_time, pitch)，pitch 抬头为正。
+
+    * `k <= 0`：与 `sp_vision_25/tools/trajectory.cpp` **同式的闭式解**（逐位一致；默认路径）
+    * `k > 0` ：数值解（RK4 + 二分），与 C++ 侧 `solve_pitch_drag` **同一套算法与常数**
+
+    k 是空气阻力系数（1/m，a_drag = -k·|v|·v），来源是 `rm_sim/configs/ballistics.yaml`
+    （由 env 读进来）—— 必须与仿真**同一个来源**，否则镜像是另一个世界。
+    """
+    if k > 0.0:
+        ok, t, pitch = _solve_pitch_drag(v0, d, h, k)
+        return (not ok), t, pitch
+
     a = G * d * d / (2.0 * v0 * v0)
     b = -d
     c = a + h
@@ -148,6 +216,9 @@ class AimerParams:
     # 这个 bias 让镜像的落点分布与 C++ 对齐 —— 否则策略学到的"这一发值不值得打"
     # 建立在过于乐观的落点分布上（实测会让选择性策略在 C++ 里崩掉）。
     pitch_bias_deg: float = 0.68      # 实测标定值（见 scratch/calib_bias.py）
+    # 弹道的空气阻力系数 k（1/m）。0 = 无阻力（默认，与历史行为一致）。
+    # 由 env 从 rm_sim/configs/ballistics.yaml 读进来，**必须与 C++ 解算器/仿真同源**。
+    drag_k: float = 0.0
 
 
 class MirrorAimer:
@@ -237,13 +308,13 @@ class MirrorAimer:
             aim_pt = center + radius * np.array([math.cos(ang), math.sin(ang), 0.0])
             rel = aim_pt - m
             d = float(np.hypot(rel[0], rel[1]))
-            traj = trajectory(v, d, float(rel[2]))
+            traj = trajectory(v, d, float(rel[2]), p.drag_k)
             if traj[0]:
                 return 0.0, 0.0, False, {}
             fly = traj[1]
         rel = aim_pt - m
         d = float(np.hypot(rel[0], rel[1]))
-        ok, fly, tp = trajectory(v, d, float(rel[2]))
+        ok, fly, tp = trajectory(v, d, float(rel[2]), p.drag_k)
         if ok:
             return 0.0, 0.0, False, {}
         yaw = math.atan2(rel[1], rel[0]) + math.radians(p.yaw_offset_deg)

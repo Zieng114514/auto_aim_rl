@@ -109,6 +109,10 @@ class FireEnv(gym.Env if gym else object):
     def _reset_episode_state(self, seed: int) -> None:
         self.tracker = MirrorTracker(self.mirror_params, self.world.fps,
                                      np.random.default_rng(seed + 7))
+        # 弹道气动：镜像解算器用**与仿真同一个 k**（默认 0 = 无阻力）。
+        # 值来自世界（世界又是从 configs/ballistics.yaml 建的），与 C++ 侧经 /grab 拿到的
+        # ball_k 是同一个来源；这样"镜像里练的"与"闭环里跑的"才是同一个弹道。
+        self.aimer_params.drag_k = float(getattr(self.world, "ball_k", 0.0))
         self.aimer = MirrorAimer(
             self.aimer_params, np.random.default_rng(seed + 13),
             jitter=(self.mirror_params.cmd_jitter_deg, self.mirror_params.cmd_jitter_tau))
