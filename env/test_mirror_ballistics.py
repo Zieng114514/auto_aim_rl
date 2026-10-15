@@ -15,6 +15,8 @@ import math
 import os
 import sys
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mirror import G, trajectory  # noqa: E402
 
@@ -116,6 +118,28 @@ def main() -> int:
             continue
         print("    %-6.0f %-6.1f %-6.2f %-9.5f %-13.6f %.2f" %
               (v0, d, h, k, math.degrees(pitch), t * 1e3))
+
+    print()
+    print("== 4. 自旋 hold-off：镜像的 drift 应与 C++ test_trajectory_spin 第 4 节逐行相同 ==")
+    from mirror import AimerParams, _magnus_drift  # noqa: E402
+    tilt = math.radians(8.0)
+    rel_unit = np.array([math.cos(tilt), 0.0, math.sin(tilt)])   # 与 C++ 同几何
+    print("    %-5s %-6s %s" % ("轴", "距离", "drift(世界系 m)"))
+    rows_py = []
+    for axis in ("barrel_up", "barrel_side"):
+        for d in (3.0, 5.0, 8.0, 10.0):
+            ap = AimerParams()
+            ap.drag_k = K
+            ap.spin_enabled = True
+            ap.spin_omega = 500.0
+            ap.spin_axis_mode = axis
+            ap.spin_cl_slope = 0.6
+            ap.spin_cl_max = 0.35
+            drift = _magnus_drift(ap, 24.0, rel_unit * d, d)
+            rows_py.append("%-5s %-6.0f %-12.6f (%.6f, %.6f, %.6f)"
+                           % ("up" if axis == "barrel_up" else "side", d, drift[0],
+                              drift[0], drift[1], drift[2]))
+            print("    " + rows_py[-1])
 
     print()
     if FAILED:

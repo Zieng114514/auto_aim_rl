@@ -83,6 +83,89 @@ def _solve_pitch_drag(v0: float, d: float, h: float, k: float):
     return True, t, pitch
 
 
+def _spin_axis_world(params, rel: np.ndarray):
+    """自旋轴（**世界系**单位向量）。轴向约定与 rm_sim 的炮口 site 一致：
+
+    * `barrel_up`   = 世界 up 垂直于炮管的分量 ⇒ 马格努斯力**横向**
+    * `barrel_side` = 炮管的局部 y 轴（实测 = -(v̂ × ẑ)）⇒ 马格努斯力**竖直**
+
+    仿真侧实测（simple 模型、yaw=90°、抬头 8°）：site 的 z 轴 = normalize(ẑ-(ẑ·v̂)v̂) ✓、
+    y 轴 = -(v̂ × ẑ) ✓。这里按同一约定取，两边才谈得上"同一个轴"。
+    """
+    n = float(np.linalg.norm(rel))
+    if n < 1e-9:
+        return None
+    vhat = rel / n
+    zhat = np.array([0.0, 0.0, 1.0])
+    if params.spin_axis_mode == "barrel_side":
+        axis = -np.cross(vhat, zhat)
+    else:
+        axis = zhat - np.dot(zhat, vhat) * vhat
+    nn = float(np.linalg.norm(axis))
+    return axis / nn if nn > 1e-9 else None
+
+
+def _fly3d(params, v0: float, rel: np.ndarray, d: float, spin_on: bool, dt: float = 2e-3):
+    """3D 弹道积分（RK4、半隐式）：重力 + 阻力 + 可选马格努斯。
+
+    沿**初始水平方向**推进到 d（该处线性插值），返回世界系落点。与 C++ `fly3d` 同一套。
+    """
+    n = float(np.linalg.norm(rel))
+    if n < 1e-9:
+        return np.zeros(3)
+    horiz = np.array([rel[0], rel[1], 0.0])
+    hn = float(np.linalg.norm(horiz))
+    if hn < 1e-9:
+        return np.zeros(3)
+    horiz /= hn
+    axis = _spin_axis_world(params, rel) if spin_on else None
+    r = params.spin_diameter_mm * 1e-3 / 2.0
+    area = math.pi * r * r
+    mass = params.spin_mass_g * 1e-3
+    k = float(params.drag_k)
+    v = rel / n * v0
+    p = np.zeros(3)
+
+    def acc(v_):
+        s = float(np.linalg.norm(v_))
+        a = np.array([0.0, 0.0, -G])
+        if s <= 0.0:
+            return a
+        if k > 0.0:
+            a = a - k * s * v_
+        if spin_on and axis is not None and params.spin_omega != 0.0:
+            cl = min(params.spin_cl_slope * (params.spin_omega * r / s), params.spin_cl_max)
+            a = a + (0.5 * params.spin_rho * area * cl * s * s / mass) * np.cross(axis, v_ / s)
+        return a
+
+    prev_x = 0.0
+    prev_p = p.copy()
+    for _ in range(20000):
+        a1 = acc(v)
+        a2 = acc(v + 0.5 * dt * a1)
+        a3 = acc(v + 0.5 * dt * a2)
+        a4 = acc(v + dt * a3)
+        prev_x, prev_p = float(np.dot(p, horiz)), p.copy()
+        v = v + dt * (a1 + 2 * a2 + 2 * a3 + a4) / 6.0
+        p = p + v * dt
+        x_now = float(np.dot(p, horiz))
+        if x_now >= d:
+            frac = (d - prev_x) / (x_now - prev_x) if x_now > prev_x else 0.0
+            return prev_p + (p - prev_p) * frac
+    return p
+
+
+def _magnus_drift(params, v0: float, rel: np.ndarray, d: float):
+    """马格努斯造成的落点偏置（世界系位移，m）。
+
+    与 C++ `tools::trajectory.cpp` 的 `magnus_drift` **同一套算法**：
+    **按定义精确** = （开自旋的 3D 落点）−（关自旋的 3D 落点）；自旋关闭时返回零向量。
+    """
+    if (not params.spin_enabled) or params.spin_omega == 0.0 or d <= 0.0:
+        return np.zeros(3)
+    return _fly3d(params, v0, rel, d, True) - _fly3d(params, v0, rel, d, False)
+
+
 def trajectory(v0: float, d: float, h: float, k: float = 0.0):
     """弹道解。返回 (unsolvable, fly_time, pitch)，pitch 抬头为正。
 
@@ -219,6 +302,15 @@ class AimerParams:
     # 弹道的空气阻力系数 k（1/m）。0 = 无阻力（默认，与历史行为一致）。
     # 由 env 从 rm_sim/configs/ballistics.yaml 读进来，**必须与 C++ 解算器/仿真同源**。
     drag_k: float = 0.0
+    # 自旋（马格努斯）—— 同样与仿真同源、默认关。轴向约定见 mirror._spin_axis_world()
+    spin_enabled: bool = False
+    spin_omega: float = 0.0
+    spin_axis_mode: str = "barrel_up"
+    spin_cl_slope: float = 0.6
+    spin_cl_max: float = 0.35
+    spin_rho: float = 1.225
+    spin_diameter_mm: float = 17.0
+    spin_mass_g: float = 3.2
 
 
 class MirrorAimer:
@@ -317,6 +409,16 @@ class MirrorAimer:
         ok, fly, tp = trajectory(v, d, float(rel[2]), p.drag_k)
         if ok:
             return 0.0, 0.0, False, {}
+        # ---- 自旋（马格努斯）hold-off：准心往 -drift 挪，再重解一次弹道 ----
+        # 默认（spin_enabled=False）时 drift 恒为 0 ⇒ 一个数都不改
+        if p.spin_enabled and p.spin_omega != 0.0:
+            drift = _magnus_drift(p, v, rel, d)
+            if float(np.linalg.norm(drift)) > 1e-6:
+                rel = rel - drift
+                d = float(np.hypot(rel[0], rel[1]))
+                ok2, _fly2, tp2 = trajectory(v, d, float(rel[2]), p.drag_k)
+                if (not ok2) and d > 0.5:
+                    tp = tp2
         yaw = math.atan2(rel[1], rel[0]) + math.radians(p.yaw_offset_deg)
         pitch = -(tp + math.radians(p.pitch_offset_deg) + math.radians(p.pitch_bias_deg))
         # 指令抖动：云台得靠伺服去追，追不上的那部分就是 C++ 里看到的 |ey|

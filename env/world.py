@@ -74,6 +74,18 @@ class HeadlessWorld:
         # 来源 = configs/ballistics.yaml（经 demo.ballistics 带过来），不给两处漂移的机会。
         _b = getattr(self.demo, "ballistics", None)
         self.ball_k = float(_b.k) if (_b is not None and _b.enabled) else 0.0
+        # 自旋（马格努斯）参数：同样只从配置来，供镜像解算器做 hold-off 修正（默认关）
+        _sp = getattr(_b, "spin", None) if _b is not None else None
+        self.ball_spin = {
+            "enabled": bool(_sp is not None and _sp.enabled),
+            "omega": float(_sp.omega_rad_s) if _sp is not None else 0.0,
+            "axis": str(_sp.axis) if _sp is not None else "barrel_up",
+            "cl_slope": float(_sp.cl_slope) if _sp is not None else 0.6,
+            "cl_max": float(_sp.cl_max) if _sp is not None else 0.35,
+            "rho": float(_b.rho) if _b is not None else 1.225,
+            "diameter_mm": float(_b.diameter_mm) if _b is not None else 17.0,
+            "mass_g": float(_b.mass_g) if _b is not None else 3.2,
+        }
         # 炮口所在 body（= pitch 体）：取世界指向要用它的姿态矩阵
         self.pitch_bid = int(self.model.site_bodyid[self.demo.muzzle_sid])
         self.cars = CarField(

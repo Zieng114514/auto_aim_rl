@@ -113,6 +113,16 @@ class FireEnv(gym.Env if gym else object):
         # 值来自世界（世界又是从 configs/ballistics.yaml 建的），与 C++ 侧经 /grab 拿到的
         # ball_k 是同一个来源；这样"镜像里练的"与"闭环里跑的"才是同一个弹道。
         self.aimer_params.drag_k = float(getattr(self.world, "ball_k", 0.0))
+        # 自旋（马格努斯）：镜像解算器的 hold-off 用它；与仿真/世界同一个来源
+        _bs = getattr(self.world, "ball_spin", None) or {}
+        self.aimer_params.spin_enabled = bool(_bs.get("enabled", False))
+        self.aimer_params.spin_omega = float(_bs.get("omega", 0.0))
+        self.aimer_params.spin_axis_mode = str(_bs.get("axis", "barrel_up"))
+        self.aimer_params.spin_cl_slope = float(_bs.get("cl_slope", 0.6))
+        self.aimer_params.spin_cl_max = float(_bs.get("cl_max", 0.35))
+        self.aimer_params.spin_rho = float(_bs.get("rho", 1.225))
+        self.aimer_params.spin_diameter_mm = float(_bs.get("diameter_mm", 17.0))
+        self.aimer_params.spin_mass_g = float(_bs.get("mass_g", 3.2))
         self.aimer = MirrorAimer(
             self.aimer_params, np.random.default_rng(seed + 13),
             jitter=(self.mirror_params.cmd_jitter_deg, self.mirror_params.cmd_jitter_tau))
