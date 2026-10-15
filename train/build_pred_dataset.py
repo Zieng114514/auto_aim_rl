@@ -84,8 +84,14 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
     if not tr:
         print(f"  ! trace 为空：{trace_path}", file=sys.stderr)
         return None
-    with open(state_path) as f:
-        st = json.load(f)
+    try:
+        with open(state_path) as f:
+            st = json.load(f)
+    except Exception as e:                      # noqa: BLE001
+        # 闭环偶尔会落下一个截断的 state.json（评测被中断/写盘竞争）⇒ 跳过这一次运行，
+        # 不要让一条坏 json 把整个数据集构建搞崩（踩过：JSONDecodeError 直接终止）
+        print(f"  ! state json 解析失败，跳过：{state_path}（{e}）", file=sys.stderr)
+        return None
     shots = st.get("shot_log", [])
     if not shots:
         print(f"  ! shot_log 为空：{state_path}", file=sys.stderr)
@@ -93,19 +99,33 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
 
     t_tr = np.asarray(tr["t"], float)
     shoot = np.asarray(tr["shoot"], float)
+    # n_shots（仿真侧发次计数）用于**精确配对**；旧 trace 没有这一列时退回时间窗
+    shots_cnt = np.asarray(tr.get("n_shots", np.zeros_like(t_tr)), float)
     order = np.argsort(t_tr)          # trace 本来就是时序，保险起见排一下
-    t_tr, shoot = t_tr[order], shoot[order]
+    t_tr, shoot, shots_cnt = t_tr[order], shoot[order], shots_cnt[order]
+    have_cnt = bool(shots_cnt.size and shots_cnt.max() > 0)
 
     X, y, raw, motion, run, shot_id, ts = [], [], [], [], [], [], []
     missed = 0
+    paired_by_cnt = 0
     for rec in shots:
         t_shot = float(rec["t"])
-        # 这一发是哪个 tick 的指令造成的：shoot==1 且 t 落在 [t_shot-窗口, t_shot]
-        cand = np.where((shoot > 0.5) & (t_tr <= t_shot) & (t_tr >= t_shot - PAIR_WINDOW_S))[0]
-        if cand.size == 0:
-            missed += 1
-            continue
-        i = int(cand[-1])
+        k = int(rec.get("id", 0))
+        i = None
+        if have_cnt and k > 0:
+            # n_shots 首次 ≥ k 的那一行 = 这一发在仿真里出现的那 tick ⇒ 取它**前一行**
+            # （= 下发指令的那 tick）。这样绕开 rm_link 的 pending_fire 延迟 ✗→✓。
+            j = int(np.searchsorted(shots_cnt, k, side="left"))
+            if j < shots_cnt.size and shots_cnt[j] >= k:
+                i = max(j - 1, 0)
+                paired_by_cnt += 1
+        if i is None:
+            # 旧 trace（没有 n_shots 列）：退回时间窗（会漏掉一批，见下面的统计输出）
+            cand = np.where((shoot > 0.5) & (t_tr <= t_shot) & (t_tr >= t_shot - PAIR_WINDOW_S))[0]
+            if cand.size == 0:
+                missed += 1
+                continue
+            i = int(cand[-1])
 
         X.append([float(tr[k][i]) for k in FEATURES])     # 列 = C++ 的 kPredFeatureNames
         # 标签：落点偏差 → "瞄准点该往哪挪"（板局部系 ≈ 世界水平/竖直，米）
@@ -117,8 +137,8 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
         shot_id.append(int(rec.get("id", len(shot_id) + 1)))
         ts.append(t_shot)
 
-    if missed:
-        print(f"  ! {missed} 发没配到 trace（窗口 {PAIR_WINDOW_S}s）—— 已跳过", file=sys.stderr)
+    if missed or paired_by_cnt:
+        print(f"  · 按发次计数精确配对 {paired_by_cnt} 发；时间窗兜底/漏掉 {missed} 发", file=sys.stderr)
     if not X:
         return None
     return (np.asarray(X, float), np.asarray(y, float), np.asarray(raw, float),
