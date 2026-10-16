@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,33 @@ import build_pred_dataset as B   # noqa: E402
 
 N_TICKS = 4000       # ≈ 200 s @20 Hz
 N_RUNS = 3
+
+# C++ 侧的"唯一真相"（相对本文件：../../sp_vision_25/tasks/auto_aim/pred_residual.cpp）
+CPP = os.path.normpath(os.path.join(HERE, "..", "..", "sp_vision_25",
+                                    "tasks", "auto_aim", "pred_residual.cpp"))
+
+
+def check_feature_contract() -> bool:
+    """C++ 的 pred_feature_names()（kNames 初始化列表）必须与 Python 的 FEATURES 逐字一致。
+
+    这是整个阶段 2 最容易静默出错的地方：两边列顺序/长度不一致时，模型会拿到错列，
+    而现象只是"效果差一点"✗ —— 所以做成硬自检。
+    """
+    if not os.path.exists(CPP):
+        print(f"⚠ 找不到 C++ 特征定义（{CPP}），跳过契约自检")
+        return True
+    src = open(CPP).read()
+    m = re.search(r"kNames\s*=\s*\{(.*?)\};", src, re.S)
+    if not m:
+        print("✗ 解析不出 C++ 的 kNames 初始化列表")
+        return False
+    cpp = re.findall(r'"([A-Za-z0-9_]+)"', m.group(1))
+    py = list(B.FEATURES)
+    if cpp == py:
+        print(f"✓ 特征契约一致：{len(py)} 维（C++ pred_feature_names() == Python FEATURES）")
+        return True
+    print(f"✗ 特征契约不一致！\n  C++  ({len(cpp)}): {cpp}\n  Py   ({len(py)}): {py}")
+    return False
 
 
 def make_run(dirpath: str, rid: int, rng: np.random.Generator):
@@ -61,6 +89,17 @@ def make_run(dirpath: str, rid: int, rng: np.random.Generator):
     f["locked"] = np.zeros(N_TICKS)
     f["range_est"] = np.hypot(f["ekf0"], f["ekf1"])
     f["fly_time_est"] = f["range_est"] / f["bullet_speed"]
+    # v2 窗口特征（真实数据里由 C++ 从历史算出；这里造独立信号，验证通路能把它们带进模型）
+    f["win_ok"] = np.ones(N_TICKS)
+    f["d_vx_2"] = 0.30 * np.sin(t * 2.3 + rid)
+    f["d_vy_2"] = 0.30 * np.cos(t * 2.9 + rid)
+    f["d_w_1"] = 0.20 * np.sin(t * 3.7)
+    f["d_erry_1"] = 0.004 * np.cos(t * 4.1)
+    f["d_errp_1"] = 0.002 * np.sin(t * 4.7)
+    f["d_cmd_yaw_1"] = 0.005 * np.cos(t * 5.3)
+    f["d_range_2"] = 0.05 * np.sin(t * 1.3)
+    f["mean_erry_2"] = 0.003 * np.sin(t * 0.8)
+    f["std_erry_2"] = 0.001 * np.cos(t * 1.1)
 
     # 发次：每 17 个 tick 打一发（shoot=1 写在该 tick 上）
     # 标签刻意做成"由特征决定 + 小噪声"：S/N ≈ 10 ⇒ 好模型应把 off_h 的 1σ 压掉 >30%
@@ -69,7 +108,7 @@ def make_run(dirpath: str, rid: int, rng: np.random.Generator):
     for i in range(10, N_TICKS, 17):
         f["shoot"][i] = 1.0
         shot_idx.append(i)
-        dlat = 0.02 * f["ekf0"][i] + 0.05 * f["ekf4"][i]
+        dlat = 0.02 * f["ekf0"][i] + 0.05 * f["ekf4"][i] + 0.06 * f["d_vy_2"][i]
         dvert = 0.05 * f["ekf5"][i] + 0.02 * (f["ekf7"][i] - 2.0)
         shots.append({
             "id": len(shots) + 1, "t": float(t[i]),
@@ -90,6 +129,8 @@ def make_run(dirpath: str, rid: int, rng: np.random.Generator):
 
 
 def main() -> int:
+    if not check_feature_contract():
+        return 1
     rng = np.random.default_rng(0)
     tmp = tempfile.mkdtemp(prefix="pred_pipeline_")
     pairs = [make_run(tmp, rid, rng) for rid in range(N_RUNS)]

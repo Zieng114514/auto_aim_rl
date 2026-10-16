@@ -47,7 +47,13 @@ FEATURES = [
     "armor_num", "target_num",
     "bullet_speed", "heat_frac", "locked",
     "range_est", "fly_time_est",
+    # ---- v2 窗口历史特征（与 C++ pred_feature_names() 逐字一致）----
+    "win_ok", "d_vx_2", "d_vy_2", "d_w_1", "d_erry_1", "d_errp_1",
+    "d_cmd_yaw_1", "d_range_2", "mean_erry_2", "std_erry_2",
 ]
+
+# 训练时丢弃的行：启动阶段历史不足（win_ok=0）——那时窗口特征全是 0 ✗ 会教坏模型
+DROP_IF_ZERO = ["win_ok"]
 
 # 开火指令 → "仿真真的打出这一发" 之间允许的时差；超过就认为没配上（宁缺勿错）
 PAIR_WINDOW_S = 0.35

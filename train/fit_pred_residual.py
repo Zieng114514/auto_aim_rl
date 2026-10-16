@@ -27,7 +27,14 @@ def load_ds(path: str):
     d = np.load(path, allow_pickle=True)
     feats = [str(f) for f in d["features"]]
     keep = [i for i, f in enumerate(feats) if f not in DROP_FEATURES]
-    return (d["X"][:, keep], d["y"], d["raw"], d["motion"], d["run"], [feats[i] for i in keep])
+    X, y, raw, motion, run = d["X"], d["y"], d["raw"], d["motion"], d["run"]
+    # 丢掉"历史不足"的样本（win_ok=0）：那时窗口特征全是 0，会教坏模型
+    if "win_ok" in feats:
+        good = X[:, feats.index("win_ok")] > 0.5
+        if not good.all():
+            print(f"丢弃历史不足的样本 {int((~good).sum())} / {X.shape[0]} 发（win_ok=0）")
+        X, y, raw, motion, run = X[good], y[good], raw[good], motion[good], run[good]
+    return X[:, keep], y, raw, motion, run, [feats[i] for i in keep]
 
 
 def report(tag: str, raw_te: np.ndarray, pred: np.ndarray, idx=None):
