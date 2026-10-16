@@ -35,21 +35,18 @@ import sys
 
 import numpy as np
 
-# 特征列 = sim_main 的 kPredFeatureNames（C++ 侧是**唯一真相**，这里必须逐字一致）。
-# 顺序/含义改动 ⇒ 数据集与已训模型全部作废，必须重采重训。
+# 特征列 = sim_main 的 pred_feature_names()（C++ 侧是**唯一真相**，这里必须逐字一致）。
+# ⚠ **只放前馈量**：目标状态 + 窗口历史 + 弹药/感知量。
+#    绝不放 gimbal_*/cmd_*/err_* 这类**控制器状态** —— 那会让模型学成"比例控制器"，
+#    部署后与 Aimer 抢活（见 agnet_experience §1.27）。
 FEATURES = [
     "has_target",
     "ekf0", "ekf1", "ekf2", "ekf3", "ekf4", "ekf5", "ekf6", "ekf7",
     "target_w",
-    "gimbal_yaw", "gimbal_pitch", "cmd_yaw", "cmd_pitch",
-    "err_yaw", "err_pitch",
-    "control", "shoot", "aim_valid",
     "armor_num", "target_num",
     "bullet_speed", "heat_frac", "locked",
     "range_est", "fly_time_est",
-    # ---- v2 窗口历史特征（与 C++ pred_feature_names() 逐字一致）----
-    "win_ok", "d_vx_2", "d_vy_2", "d_w_1", "d_erry_1", "d_errp_1",
-    "d_cmd_yaw_1", "d_range_2", "mean_erry_2", "std_erry_2",
+    "win_ok", "d_vx_2", "d_vy_2", "d_w_1", "d_range_2",
 ]
 
 # 训练时丢弃的行：启动阶段历史不足（win_ok=0）——那时窗口特征全是 0 ✗ 会教坏模型
@@ -104,7 +101,7 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
         return None
 
     t_tr = np.asarray(tr["t"], float)
-    shoot = np.asarray(tr["shoot"], float)
+    shoot = np.asarray(tr["shoot"], float) if "shoot" in tr else np.zeros_like(t_tr)
     # n_shots（仿真侧发次计数）用于**精确配对**；旧 trace 没有这一列时退回时间窗
     shots_cnt = np.asarray(tr.get("n_shots", np.zeros_like(t_tr)), float)
     order = np.argsort(t_tr)          # trace 本来就是时序，保险起见排一下
@@ -132,7 +129,11 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
                 i = max(j - 1, 0)
                 paired_by_cnt += 1
         if i is None:
-            # 旧 trace（没有 n_shots 列）：退回时间窗（会漏掉一批，见下面的统计输出）
+            # 旧 trace 的兜底路径（按时间窗）。注意：v4 起特征里**没有 shoot 列**了，
+            # 所以这里必须先确认列存在，否则会 KeyError（踩过 ✗）。
+            if "shoot" not in tr:
+                missed += 1
+                continue
             cand = np.where((shoot > 0.5) & (t_tr <= t_shot) & (t_tr >= t_shot - PAIR_WINDOW_S))[0]
             if cand.size == 0:
                 missed += 1
