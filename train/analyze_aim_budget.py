@@ -206,12 +206,18 @@ def analyze_run(trace_path: str, state_path: str, acc: dict) -> int:
             continue
 
         key = str(rec.get("motion", "-"))
-        a = acc.setdefault(key, {"n": 0, "et": [], "em": [], "etp": [], "emp": []})
+        a = acc.setdefault(key, {"n": 0, "et": [], "em": [], "etp": [], "emp": [], "gz": []})
         a["n"] += 1
         a["et"].append(abs(float(rec["off_dyaw"])) * 1000.0)
         a["etp"].append(abs(float(rec["off_dpitch"])) * 1000.0)
         a["em"].append(abs(man[0]))
         a["emp"].append(abs(man[1]))
+        # **竖直模型缺口**：tracker 的预测里没有竖直运动学（z 恒定 ✗）⇒
+        # |z_true(t+Δ) − z_true(t)| / R 就是它漏掉的那一份 ✓（升降靶上会很大 ✓）
+        i0 = int(np.searchsorted(tp, t0, side="right")) - 1
+        if 0 <= i0 < tp.size:
+            gz = abs(float(xp[i0, 2] - p_fu[2])) / max(rng, 0.5) * 1000.0
+            a["gz"].append(gz)
         n_used += 1
     if n_fallback or n_reject:
         print(f"  （其中 {n_fallback} 发用「最近板」兜底，{n_reject} 发因外推跑飞被剔除）", file=sys.stderr)
@@ -245,20 +251,21 @@ def main() -> int:
         return 1
 
     print("\n=== A1 误差预算（单位 mrad；1 mrad ≈ 每米 1 mm）===")
-    print("%-18s %4s %10s %10s %8s %10s %10s %8s"
-          % ("靶型", "N", "总Δyaw中位", "机动Δyaw中位", "机动占比", "总Δpitch中位", "机动Δpitch中位", "占比"))
-    tot = {"et": [], "em": [], "etp": [], "emp": []}
+    print("%-18s %4s %9s %9s %6s %9s %9s %6s %9s"
+          % ("靶型", "N", "总Δyaw", "机动Δyaw", "占比", "总Δpitch", "机动Δpitch", "占比", "竖直缺口"))
+    tot = {"et": [], "em": [], "etp": [], "emp": [], "gz": []}
     for key in sorted(acc, key=lambda k: -acc[k]["n"]):
         d = acc[key]
         if d["n"] < 3:
             continue
         et = float(np.median(d["et"])); em = float(np.median(d["em"]))
         etp = float(np.median(d["etp"])); emp = float(np.median(d["emp"]))
-        print("%-18s %4d %10.2f %10.2f %7.0f%% %10.2f %10.2f %7.0f%%"
+        gz = float(np.median(d["gz"])) if d["gz"] else 0.0
+        print("%-18s %4d %9.2f %9.2f %5.0f%% %9.2f %9.2f %5.0f%% %9.2f"
               % (key, d["n"], et, em, 100 * em / max(et, 1e-9),
-                 etp, emp, 100 * emp / max(etp, 1e-9)))
-        for s, t in (("et", "et"), ("em", "em"), ("etp", "etp"), ("emp", "emp")):
-            tot[t].extend(d[s])
+                 etp, emp, 100 * emp / max(etp, 1e-9), gz))
+        for s in ("et", "em", "etp", "emp", "gz"):
+            tot[s].extend(d[s])
 
     if tot["et"]:
         et = float(np.median(tot["et"])); em = float(np.median(tot["em"]))
