@@ -114,7 +114,13 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
     X, y, raw, motion, run, shot_id, ts = [], [], [], [], [], [], []
     missed = 0
     paired_by_cnt = 0
+    skipped_far = 0
     for rec in shots:
+        # 只收"真的接近过某块装甲板"的弹：`min_dist = -1` 表示整条弹道都没接近过 ✗
+        # 它的 off_* 全是 0 ⇒ 当成"完美样本"混进训练集会教坏模型（旧数据集就有这个缺陷 ✗）。
+        if float(rec.get("min_dist", -1.0)) < 0.0 or float(rec.get("range3", 0.0)) <= 0.5:
+            skipped_far += 1
+            continue
         t_shot = float(rec["t"])
         k = int(rec.get("id", 0))
         i = None
@@ -134,17 +140,26 @@ def pair_run(trace_path: str, state_path: str, run_id: int):
             i = int(cand[-1])
 
         X.append([float(tr[k][i]) for k in FEATURES])     # 列 = C++ 的 kPredFeatureNames
-        # 标签：落点偏差 → "瞄准点该往哪挪"（板局部系 ≈ 世界水平/竖直，米）
-        y.append([-float(rec["off_h"]), -float(rec["off_v"])])
-        raw.append([float(rec["off_h"]), float(rec["off_v"]),
-                    float(rec.get("off_n", 0.0)), float(rec.get("range", 0.0) or 0.0)])
+        # 标签：**与指令空间对齐**的角度修正量（弧度）——
+        # off_dyaw/off_dpitch 由仿真按 aimer.cpp 的口径直接推导（见 rm_gimbal_demo.py 的注释）。
+        # ⚠ 旧数据的 off_h/off_v 是**装甲板局部系**，与本标签不同坐标系 ✗ ⇒ 直接跳过，
+        #   绝不允许两种坐标系的数据混进同一个数据集（踩过：坐标系不一致 ⇒ 离线漂亮闭环变差）
+        if "off_dyaw" not in rec or "off_dpitch" not in rec:
+            print(f"  ! 该运行的 shot_log 没有指令空间的标签（off_dyaw/off_dpitch）⇒ 跳过："
+                  f"{state_path}", file=sys.stderr)
+            return None
+        y.append([float(rec["off_dyaw"]), float(rec["off_dpitch"])])
+        raw.append([float(rec["off_dyaw"]), float(rec["off_dpitch"]),
+                    float(rec.get("off_n", 0.0)), float(rec.get("range3", 0.0) or 0.0)])
         motion.append(motion_code(rec.get("motion", "-")))
         run.append(run_id)
         shot_id.append(int(rec.get("id", len(shot_id) + 1)))
         ts.append(t_shot)
 
-    if missed or paired_by_cnt:
-        print(f"  · 按发次计数精确配对 {paired_by_cnt} 发；时间窗兜底/漏掉 {missed} 发", file=sys.stderr)
+    if missed or paired_by_cnt or skipped_far:
+        print(f"  · 按发次计数精确配对 {paired_by_cnt} 发；"
+              f"跳过'没接近过装甲板'的弹 {skipped_far} 发；时间窗兜底/漏掉 {missed} 发",
+              file=sys.stderr)
     if not X:
         return None
     return (np.asarray(X, float), np.asarray(y, float), np.asarray(raw, float),
@@ -193,10 +208,14 @@ def main() -> int:
     np.savez(a.out, X=X, y=y, raw=raw, motion=motion, run=run, shot_id=shot_id, t=t,
              features=np.array(FEATURES, dtype=object))
     print(f"\n合计 {X.shape[0]} 发 → {a.out}")
-    print(f"  水平 off_h：1σ {np.std(raw[:, 0]) * 1000:6.1f} mm"
-          f"  均值 {np.mean(raw[:, 0]) * 1000:+7.1f} mm")
-    print(f"  竖直 off_v：1σ {np.std(raw[:, 1]) * 1000:6.1f} mm"
-          f"  均值 {np.mean(raw[:, 1]) * 1000:+7.1f} mm")
+    print(f"  标签单位 = 弧度（指令空间）：Δyaw 1σ {np.std(raw[:, 0]) * 1000:5.2f} mrad"
+          f"（均值 {np.mean(raw[:, 0]) * 1000:+6.2f}）"
+          f"｜ Δpitch 1σ {np.std(raw[:, 1]) * 1000:5.2f} mrad（均值 {np.mean(raw[:, 1]) * 1000:+6.2f}）")
+    r3 = raw[:, 3][raw[:, 3] > 0]
+    if r3.size:
+        sc = float(np.median(r3)) * 1000.0     # mrad → mm @ 中位距离
+        print(f"  换算到中位距离 {np.median(r3):.2f} m：Δyaw 1σ ≈ {np.std(raw[:, 0]) * sc:5.1f} mm"
+              f"｜ Δpitch 1σ ≈ {np.std(raw[:, 1]) * sc:5.1f} mm（1 mrad ≈ {sc:.1f} mm）")
     uniq, cnt = np.unique(motion, return_counts=True)
     print("  按靶型段：" + "  ".join(f"{u}:{c}" for u, c in zip(uniq, cnt)))
     uniq, cnt = np.unique(run, return_counts=True)

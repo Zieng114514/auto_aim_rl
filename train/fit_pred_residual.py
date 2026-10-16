@@ -38,22 +38,36 @@ def load_ds(path: str):
 
 
 def report(tag: str, raw_te: np.ndarray, pred: np.ndarray, idx=None):
-    """闭环口径指标：修正前后 off_h/off_v 的 1σ，以及"板内"代理命中率。"""
+    """闭环口径指标：修正前后**角度修正量**的 1σ（mrad）+ 换算到中位距离的 mm + 板内代理命中率。
+
+    标签 = 指令空间的 (Δyaw, Δpitch)（弧度）⇒ 它的 1σ 就是"如果不修，落点会偏多少"的
+    角度度量；加上模型预测后 1σ 变小，等价于落点散布变小 ✓（两边同一个坐标系 ✓）。
+    """
     if idx is not None:
         raw_te, pred = raw_te[idx], pred[idx]
     if raw_te.shape[0] == 0:
         print(f"  {tag}: 没有样本")
         return None
-    off_h, off_v = raw_te[:, 0], raw_te[:, 1]
-    h0, v0 = float(np.std(off_h)), float(np.std(off_v))
-    h1 = float(np.std(off_h + pred[:, 0]))
-    v1 = float(np.std(off_v + pred[:, 1]))
-    # 命中率代理：小装甲板半宽 70mm / 半高 28mm —— 只作趋势参考（真实判定在仿真侧）
-    hit0 = np.mean((np.abs(off_h) < 0.070) & (np.abs(off_v) < 0.028))
-    hit1 = np.mean((np.abs(off_h + pred[:, 0]) < 0.070) & (np.abs(off_v + pred[:, 1]) < 0.028))
-    print(f"  {tag}: off_h 1σ {h0 * 1000:6.1f} → {h1 * 1000:6.1f} mm"
-          f"（{100 * (h1 / h0 - 1):+5.1f}%）｜ off_v 1σ {v0 * 1000:6.1f} → {v1 * 1000:6.1f} mm"
-          f"（{100 * (v1 / v0 - 1):+5.1f}%）｜ 板内代理命中 {hit0 * 100:4.1f}% → {hit1 * 100:4.1f}%")
+    dy, dp, r3 = raw_te[:, 0], raw_te[:, 1], raw_te[:, 3]
+    m = r3 > 0.5
+    if m.sum() < 2:
+        print(f"  {tag}: 缺 range3（新标签才带），无法换算 mm")
+        return None
+    sc = float(np.median(r3[m])) * 1000.0          # mrad → mm @ 中位距离
+    # ⚠ 符号：raw 存的是"该加的修正量"（标签本身）⇒ 施加 pred 之后的**剩余误差** = raw − pred ✓
+    # （不是相加 ✗ —— 相加等于把误差翻倍，自检里就是这么发现公式写错的）
+    res = dy - pred[m, 0]
+    resp = dp - pred[m, 1]
+    h0, h1 = float(np.std(dy[m])), float(np.std(res[m]))
+    v0, v1 = float(np.std(dp[m])), float(np.std(resp[m]))
+    # 板内代理命中：把"剩余角度误差 × 距离"当作横向/竖直偏差（mm，小角近似）
+    lat2, ver2 = res[m] * r3[m] * 1000.0, resp[m] * r3[m] * 1000.0
+    hit0 = float(np.mean((np.abs(dy[m] * r3[m] * 1000.0) < 70)
+                         & (np.abs(dp[m] * r3[m] * 1000.0) < 28)))
+    hit1 = float(np.mean((np.abs(lat2) < 70) & (np.abs(ver2) < 28)))
+    print(f"  {tag}: Δyaw 1σ {h0 * 1000:5.2f} → {h1 * 1000:5.2f} mrad（{100 * (h1 / h0 - 1):+5.1f}%）"
+          f"｜ Δpitch 1σ {v0 * 1000:5.2f} → {v1 * 1000:5.2f} mrad（{100 * (v1 / v0 - 1):+5.1f}%）"
+          f"｜ 板内代理命中 {hit0 * 100:4.1f}% → {hit1 * 100:4.1f}%")
     return h1 / h0 - 1.0
 
 

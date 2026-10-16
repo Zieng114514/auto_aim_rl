@@ -110,10 +110,16 @@ def make_run(dirpath: str, rid: int, rng: np.random.Generator):
         shot_idx.append(i)
         dlat = 0.02 * f["ekf0"][i] + 0.05 * f["ekf4"][i] + 0.06 * f["d_vy_2"][i]
         dvert = 0.05 * f["ekf5"][i] + 0.02 * (f["ekf7"][i] - 2.0)
+        R3 = float(f["range_est"][i]) + 0.4      # 出膛点到板心的 3D 距离 ≈ 水平距离 + 一点
+        # 新标签（指令空间角度修正量）：与本仓库 rm_gimbal_demo.py 的定义一致
+        off_dyaw = -dlat / R3
+        off_dpitch = dvert / R3
         shots.append({
             "id": len(shots) + 1, "t": float(t[i]),
             "off_h": float(-dlat + rng.normal(0, 0.002)),
             "off_v": float(-dvert + rng.normal(0, 0.002)), "off_n": 0.0,
+            "off_y_gimbal": float(dlat), "off_z_gimbal": float(dvert),
+            "off_dyaw": float(off_dyaw), "off_dpitch": float(off_dpitch), "range3": R3,
             "range": float(f["range_est"][i]), "motion": "script_%d" % (1 + (i // 100) % 4),
         })
 
@@ -172,11 +178,12 @@ def main() -> int:
         print(f"✓ onnxruntime 前向：输入 {zeros.shape} → 输出 {pred.shape}（期望 (1, 2)）")
         holdout = int(np.bincount(run).argmax())
         m = run == holdout
-        h0, h1 = np.std(raw[m, 0]), np.std(raw[m, 0] + pred[m, 0])
-        v0, v1 = np.std(raw[m, 1]), np.std(raw[m, 1] + pred[m, 1])
+        # 剩余误差 = 标签（该加的修正量）− 预测 ✓（v1 是"偏差 + 修正"，换了标签定义后必须反过来）
+        h0, h1 = np.std(raw[m, 0]), np.std(raw[m, 0] - pred[m, 0])
+        v0, v1 = np.std(raw[m, 1]), np.std(raw[m, 1] - pred[m, 1])
         red_h = 100 * (h1 / h0 - 1)
-        print(f"  留出 run{holdout}（{int(m.sum())} 发）：off_h 1σ {h0 * 1000:.1f} → {h1 * 1000:.1f} mm"
-              f"（{red_h:+.1f}%）｜ off_v {v0 * 1000:.1f} → {v1 * 1000:.1f} mm"
+        print(f"  留出 run{holdout}（{int(m.sum())} 发）：Δyaw 1σ {h0 * 1000:.2f} → {h1 * 1000:.2f} mrad"
+              f"（{red_h:+.1f}%）｜ Δpitch {v0 * 1000:.2f} → {v1 * 1000:.2f} mrad"
               f"（{100 * (v1 / v0 - 1):+.1f}%）")
         if pred.shape != (X.shape[0], 2):
             print("✗ 输出维度不对", file=sys.stderr)
