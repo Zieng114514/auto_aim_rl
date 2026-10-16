@@ -7,6 +7,7 @@
 #      VENV=~/venvs/rl bash deploy_env.sh       # 换 venv
 #      bash deploy_env.sh --no-torch            # 先不装 torch（只跑纯算术自检）
 #      TORCH_INDEX=<url> bash deploy_env.sh     # 指定 torch 源（x86 上要 CUDA 版时）
+#      TORCH_FIND_LINKS=<dir-url> TORCH_PIN='torch==2.9.1+cpu' bash deploy_env.sh   # 国内镜像走这条
 #
 #  ---- 前置（很硬）----
 #  1) **`rm_sim` 必须与 `auto_aim_rl` 并列在同一个父目录**（env 直接 import 它）：
@@ -95,8 +96,20 @@ else
       || { bad "torch（Jetson CUDA 轮子）装失败；确认 JetPack 版本与索引匹配"; exit 1; }
   else
     # x86：默认 CPU 轮子（要 CUDA 就 TORCH_INDEX=https://download.pytorch.org/whl/cu121）
-    "$V/pip" install -q --index-url "${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}" torch \
-      || { bad "torch 装失败"; exit 1; }
+    # ⚠ 国内网络：download.pytorch.org 常不通/极慢（2026-10-16 云端 T4 实测卡死 ✗，
+    #   而且改从 PyPI 装会连带 ~5GB 的 cu1xx nvidia 依赖 ⇒ 8GB 小根盘直接爆 ✗）
+    #   ⇒ 正解：用镜像的**轮子目录**（find-links）+ 版本钉死，例：
+    #      TORCH_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cpu \
+    #      TORCH_PIN='torch==2.9.1+cpu' bash deploy_env.sh
+    if [[ -n "${TORCH_FIND_LINKS:-}" ]]; then
+      "$V/pip" install -q \
+          -i "${PIP_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}" \
+          -f "$TORCH_FIND_LINKS" "${TORCH_PIN:-torch}" \
+        || { bad "torch 装失败（find-links=$TORCH_FIND_LINKS pin=${TORCH_PIN:-torch}）"; exit 1; }
+    else
+      "$V/pip" install -q --index-url "${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}" torch \
+        || { bad "torch 装失败"; exit 1; }
+    fi
   fi
   ok "torch 装好"
 fi
