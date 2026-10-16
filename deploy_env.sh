@@ -84,7 +84,7 @@ if ! "$V/pip" install -q -i "$PIP_MIRROR" "$MUJOCO_PIN" \
       "$NUMPY_PIN" PyYAML gymnasium matplotlib onnx onnxscript onnxruntime scikit-learn \
       || { bad "依赖装不上，检查网络/代理"; exit 1; }
 fi
-ok "基础依赖装好（含 $MUJOCO_PIN）"
+ok "基础依赖装好（含 ${MUJOCO_PIN}）"
 
 if [[ "$WITH_TORCH" == 0 ]]; then
   ok "跳过 torch（--no-torch）"
@@ -141,7 +141,7 @@ HASH="$( (cd "$WS" && timeout 900 "$V/python" scratch/golden_trace.py deploy 2>/
          | grep -oE "qpos_hash=[0-9a-f]+" | cut -d= -f2)"
 EXPECT="c76a72ab6149211b800259e871dad902"
 if [[ "$HASH" == "$EXPECT" ]]; then
-  echo "PASS（$HASH）"
+  echo "PASS（${HASH}）"
 elif [[ -n "$HASH" ]]; then
   echo "⚠ 与文档基线不一致：$HASH"
   echo "       文档基线是 $EXPECT。可能原因：mujoco 没钉 3.11.0、或真模型资产被重建过。"
