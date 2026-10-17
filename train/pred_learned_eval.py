@@ -140,13 +140,20 @@ def build(trace_path: str, shots: list):
         v_tan = abs(float(f["ekf7"][i])) * r_xy
         extra = [r_xy, phi_rel, float(r_vec[2]), v_tan]
 
-        ty, tp = yawpitch(truth_g)
-        ny, npp = yawpitch(aim_g)
-        oy, opp = yawpitch(p_oracle)
-        ey, epp = yawpitch(p_ekf)
+        # ② 学"状态残差"：真值板速度 − EKF 隐含的板速度 ✓（有物理量纲 ✓）
+        #   EKF 板速度 = 中心速度 + ω×r（w = ekf7 ✓）
+        w = float(f["ekf7"][i])
+        v_plate_ekf = ve + np.array([-w * r_vec[1], w * r_vec[0], 0.0])
+        v_plate_true = Rg @ vel_w
+        dv = v_plate_true - v_plate_ekf
+
         out.append(dict(
             x=[float(f[k][i]) for k in FEATURES] + extra,
-            y=[ty, tp], now=[ny, npp], cv_ekf=[ey, epp], cv_oracle=[oy, opp],
+            truth=truth_g.tolist(),
+            now=aim_g.tolist(),
+            p_cv=p_ekf.tolist(),
+            p_oracle=p_oracle.tolist(),
+            dv=dv.tolist(),
             motion=str(s.get("motion", "-")), t=ts, tau=tau,
         ))
     return out
@@ -203,20 +210,25 @@ def evaluate(rows: list, split: str) -> dict:
     runs = np.array([r["run"] for r in rows])
     motions = np.array([r["motion"] for r in rows])
     X = np.array([r["x"] for r in rows], dtype=float)
-    Y = np.array([r["y"] for r in rows], dtype=float)
-    base = {k: np.array([r[k] for r in rows], dtype=float)
-            for k in ("now", "cv_ekf", "cv_oracle")}
-    pred = {k: np.zeros_like(Y) for k in ("ridge", "mlp")}
+    TAU = np.array([r["tau"] for r in rows], dtype=float)
+    truth = np.array([r["truth"] for r in rows], dtype=float)
+    P = {k: np.array([r[k] for r in rows], dtype=float)
+         for k in ("now", "p_cv", "p_oracle")}
+    Ydir = np.array([yawpitch(v) for v in truth])            # (N,2) 目标方向 ✓
+    Ydv = np.array([r["dv"] for r in rows], dtype=float)     # (N,3) 速度残差 ✓
+
+    dir_pred = {k: np.zeros_like(Ydir) for k in ("ridge", "mlp")}
+    pos_pred = {k: np.zeros_like(P["p_cv"]) for k in ("ridge_r", "mlp_r")}
 
     if split == "motion":
         folds = [(motions != g, motions == g) for g in sorted(set(motions))]
     elif split == "run":
         uniq = sorted(set(runs))
         folds = []
-        for k in range(0, len(uniq), 4):                 # 每折留出 4 场 ✓
+        for k in range(0, len(uniq), 4):
             hold = list(uniq[k:k + 4])
             folds.append((~np.isin(runs, hold), np.isin(runs, hold)))
-    else:                                                # random（仅参考 ✗）
+    else:
         idx = np.random.default_rng(0).permutation(len(rows))
         tr = np.zeros(len(rows), bool)
         tr[idx[: int(0.7 * len(rows))]] = True
@@ -226,15 +238,28 @@ def evaluate(rows: list, split: str) -> dict:
         if te_m.sum() == 0 or tr_m.sum() < 50:
             continue
         mu, sd = X[tr_m].mean(axis=0), X[tr_m].std(axis=0) + 1e-9
-        ym, ys = Y[tr_m].mean(axis=0), Y[tr_m].std(axis=0) + 1e-9
         Xtr, Xte = (X[tr_m] - mu) / sd, (X[te_m] - mu) / sd
-        Ytr = (Y[tr_m] - ym) / ys
-        pred["ridge"][te_m] = ridge_pred(ridge_fit(Xtr, Ytr, lam=3.0), Xte) * ys + ym
-        pred["mlp"][te_m] = mlp_fit(Xtr, Ytr)(Xte) * ys + ym
+        # ① 直接给方向
+        ym, ys = Ydir[tr_m].mean(axis=0), Ydir[tr_m].std(axis=0) + 1e-9
+        Ytr = (Ydir[tr_m] - ym) / ys
+        dir_pred["ridge"][te_m] = ridge_pred(ridge_fit(Xtr, Ytr, 3.0), Xte) * ys + ym
+        dir_pred["mlp"][te_m] = mlp_fit(Xtr, Ytr)(Xte) * ys + ym
+        # ② 给速度残差 ⇒ 加到几何外推上（× τ ✓）
+        ym2, ys2 = Ydv[tr_m].mean(axis=0), Ydv[tr_m].std(axis=0) + 1e-9
+        Ytr2 = (Ydv[tr_m] - ym2) / ys2
+        dvh = ridge_pred(ridge_fit(Xtr, Ytr2, 3.0), Xte) * ys2 + ym2
+        pos_pred["ridge_r"][te_m] = P["p_cv"][te_m] + dvh * TAU[te_m][:, None]
+        dvh2 = mlp_fit(Xtr, Ytr2)(Xte) * ys2 + ym2
+        pos_pred["mlp_r"][te_m] = P["p_cv"][te_m] + dvh2 * TAU[te_m][:, None]
 
     out = {}
-    for name, P in list(base.items()) + list(pred.items()):
-        e = ang_err(P, Y)
+    for name, Q in list(P.items()) + list(pos_pred.items()):
+        py = np.array([yawpitch(v) for v in Q])
+        e = ang_err(py, Ydir)
+        out[name] = (rms(e[:, 0]), rms(e[:, 1]),
+                     float(np.median(np.abs(e[:, 0]))), float(np.median(np.abs(e[:, 1]))))
+    for name, D in dir_pred.items():
+        e = ang_err(D, Ydir)
         out[name] = (rms(e[:, 0]), rms(e[:, 1]),
                      float(np.median(np.abs(e[:, 0]))), float(np.median(np.abs(e[:, 1]))))
     return out
@@ -267,13 +292,18 @@ def main() -> int:
     for split, label in (("motion", "按机动留出（A1 口径 ✓）"),
                          ("run", "按场留出 ✓")):
         res = evaluate(rows, split)
-        for name in ("now", "cv_ekf", "cv_oracle", "ridge", "mlp"):
+        for name in ("now", "p_cv", "p_oracle", "ridge", "mlp", "ridge_r", "mlp_r"):
             a = res[name]
-            tag = {"cv_ekf": " ← 真正的对手", "cv_oracle": " ← 上界",
-                   "ridge": " ← 学习", "mlp": " ← 学习"}.get(name, "")
+            tag = {"p_cv": " ← 几何外推（对手）", "p_oracle": " ← 上界",
+                   "ridge": " ← 学方向", "mlp": " ← 学方向",
+                   "ridge_r": " ← **学残差**", "mlp_r": " ← **学残差**"}.get(name, "")
             print("| %s | `%s`%s | %.2f° | %.2f° | %.2f° | %.2f° |"
                   % (label, name, tag, a[0], a[1], a[2], a[3]))
         print()
+
+    print("> **验收线**：`ridge_r`/`mlp_r` 在**按机动留出**下 yaw RMS 低于 `p_cv`（4.75°）才算有价值 ✓")
+    print("> 上界 `p_oracle` = 3.14° ✓（`SUMMARY_CEILING.md` ✓）")
+    return 0
 
     print("> **验收线**：`ridge`/`mlp` 在**按机动留出**下 yaw RMS 低于 `cv_ekf` 才算有价值 ✓")
     print("> 参考：oracle 上界 yaw ≈ 3.1° ✓（`SUMMARY_CEILING.md` ✓）")
