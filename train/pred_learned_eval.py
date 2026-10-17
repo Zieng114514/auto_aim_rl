@@ -131,12 +131,21 @@ def build(trace_path: str, shots: list):
         r_vec = aim_g - xe
         p_ekf = xe + ve * tau + rotz(float(f["ekf7"][i]) * tau) @ r_vec
 
+        # ① 补"板几何"特征（诊断：缺 r/相位 ⇒ 模型推不出"那块板"在哪 ✓）
+        #   r / φ 从"EKF 中心 → 瞄准点"反算（因果 ✓，不用真值 ✓）；
+        #   φ_相对 = φ − EKF yaw ⇒ 对固定安装的装甲板近似常数 ✓（可当"哪块板"的身份 ✓）
+        r_xy = float(math.hypot(r_vec[0], r_vec[1]))
+        phi = float(math.atan2(r_vec[1], r_vec[0]))
+        phi_rel = math.degrees(wrap(np.radians(phi - float(f["ekf6"][i]))))
+        v_tan = abs(float(f["ekf7"][i])) * r_xy
+        extra = [r_xy, phi_rel, float(r_vec[2]), v_tan]
+
         ty, tp = yawpitch(truth_g)
         ny, npp = yawpitch(aim_g)
         oy, opp = yawpitch(p_oracle)
         ey, epp = yawpitch(p_ekf)
         out.append(dict(
-            x=[float(f[k][i]) for k in FEATURES],
+            x=[float(f[k][i]) for k in FEATURES] + extra,
             y=[ty, tp], now=[ny, npp], cv_ekf=[ey, epp], cv_oracle=[oy, opp],
             motion=str(s.get("motion", "-")), t=ts, tau=tau,
         ))
@@ -256,8 +265,7 @@ def main() -> int:
     print("| 划分 | 方法 | yaw RMS | pitch RMS | yaw 中位 | pitch 中位 |")
     print("|---|---|---|---|---|---|")
     for split, label in (("motion", "按机动留出（A1 口径 ✓）"),
-                         ("run", "按场留出 ✓"),
-                         ("random", "随机（仅参考 ✗）")):
+                         ("run", "按场留出 ✓")):
         res = evaluate(rows, split)
         for name in ("now", "cv_ekf", "cv_oracle", "ridge", "mlp"):
             a = res[name]
