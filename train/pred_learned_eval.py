@@ -138,7 +138,9 @@ def build(trace_path: str, shots: list):
         phi = float(math.atan2(r_vec[1], r_vec[0]))
         phi_rel = math.degrees(wrap(np.radians(phi - float(f["ekf6"][i]))))
         v_tan = abs(float(f["ekf7"][i])) * r_xy
-        extra = [r_xy, phi_rel, float(r_vec[2]), v_tan]
+        # 默认带上板几何；`NO_GEOM=1` 时只用 22 维原特征 ✓
+        # （若能只用 22 维达标 ⇒ 不必改 C++ 特征与 trace 口径、不必重采数据 ✓✓）
+        extra = [] if os.environ.get("NO_GEOM") else [r_xy, phi_rel, float(r_vec[2]), v_tan]
 
         # ② 学"状态残差"：真值板速度 − EKF 隐含的板速度 ✓（有物理量纲 ✓）
         #   EKF 板速度 = 中心速度 + ω×r（w = ekf7 ✓）
