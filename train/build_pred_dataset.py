@@ -73,10 +73,26 @@ def read_trace(path: str) -> dict:
     return out
 
 
+MOTION_IDS = {
+    "-": 0,
+    # 2026 四段基准（benchmark_2026_legacy / benchmark_2026_wl）
+    "dash_halt": 1, "inplace_spin": 2, "move_spin_const": 3, "move_spin_rand": 4,
+    # 四种带升降靶型（benchmark_2026_lift）
+    "lift_static": 5, "lift_linear": 6, "lift_spin": 7, "lift_random": 8,
+}
+
+
 def motion_code(motion: str) -> int:
-    """靶型段名 → 编号（`-` = 非脚本模式；其余取名字里的数字，没有则 0）。"""
+    """靶型段名 → 稳定编号。
+
+    ⚠ 曾经是"取名字里的数字"✗：2026-10-17 v4 电池的靶型名（`dash_halt` 等）**没有数字**
+    ⇒ 全被判成 0 ✗，npz 里 `motion` 全 0、分段统计全废 ✓。现在改成**显式名字表** ✓；
+    未知名字先退回"取数字"（兼容旧数据），再退回 0 ✓。
+    """
     if not motion or motion == "-":
         return 0
+    if motion in MOTION_IDS:
+        return MOTION_IDS[motion]
     digits = "".join(ch for ch in motion if ch.isdigit())
     return int(digits) if digits else 0
 
